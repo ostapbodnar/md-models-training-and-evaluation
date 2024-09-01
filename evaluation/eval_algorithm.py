@@ -1,82 +1,63 @@
+from typing import List
+
+from pydantic import BaseModel
+
 from evaluation.annotation import TaggedText
-from evaluation.llm_reponse import Token
 
 
 class TaggedTextComparison:
-    def __init__(self, max_position_deviation: int = 0, ignore_additional_tags: bool = True):
-        """
-        Initialize the comparison object.
-
-        :param max_position_deviation: Maximum allowed deviation in character positions when comparing tag locations.
-        :param ignore_additional_tags: If True, additional tags in the proposed text are ignored in the accuracy calculation.
-        """
-        self.max_position_deviation = max_position_deviation
+    def __init__(self, ignore_additional_tags: bool = False, max_position_deviation: int = 0,
+                 penalty_per_extra_tag: float = 0.1) -> None:
         self.ignore_additional_tags = ignore_additional_tags
+        self.max_position_deviation = max_position_deviation
+        self.penalty_per_extra_tag = penalty_per_extra_tag
 
-    def calculate_tag_similarity(self, reference_tag: Token, proposed_tag: Token) -> float:
-        """
-        Calculate the similarity score between two tags.
+    def _calculate_attr_similarity(self, ref_tag: BaseModel, prop_tag: BaseModel) -> float:
+        pos_tag_match = ref_tag.pos_tag == prop_tag.pos_tag
+        ner_tag_match = ref_tag.ner_tag == prop_tag.ner_tag
+        gec_error_match = ref_tag.gec_error == prop_tag.gec_error
 
-        :param reference_tag: The tag from the reference text.
-        :param proposed_tag: The tag from the proposed text.
-        :return: A similarity score between 0 and 1.
-        """
-        score = 0.0
-        if reference_tag.pos_tag == proposed_tag.pos_tag or reference_tag.ner_tag == proposed_tag.ner_tag or reference_tag.gec_error == proposed_tag.gec_error:
-            score += 0.5
-        if reference_tag.pos_tag == proposed_tag.pos_tag:
-            score += 0.5
-        if reference_tag.ner_tag == proposed_tag.ner_tag:
-            score += 0.5
-        if reference_tag.gec_error == proposed_tag.gec_error:
-            score += 0.5
-        return score / 1.5
+        total_attributes = 3
+        matched_attributes = sum([pos_tag_match, ner_tag_match, gec_error_match])
 
-    def are_locations_similar(self, ref_start: int, ref_end: int, prop_start: int, prop_end: int) -> bool:
-        """
-        Check if the locations of two tags are similar within an allowed deviation.
+        return matched_attributes / total_attributes
 
-        :param ref_start: Start position of the reference tag.
-        :param ref_end: End position of the reference tag.
-        :param prop_start: Start position of the proposed tag.
-        :param prop_end: End position of the proposed tag.
-        :return: True if locations are considered similar, False otherwise.
-        """
-        return abs(ref_start - prop_start) <= self.max_position_deviation and abs(ref_end - prop_end) <= self.max_position_deviation
+    def _calculate_position_match(self, ref_start: int, ref_end: int, prop_start: int, prop_end: int) -> bool:
+        return abs(ref_start - prop_start) <= self.max_position_deviation and abs(
+            ref_end - prop_end) <= self.max_position_deviation
 
-    def compute_accuracy_score(self, reference_text: TaggedText, proposed_text: TaggedText) -> float:
-        """
-        Compute the accuracy score between two instances of TaggedText.
-
-        :param reference_text: The reference TaggedText instance.
-        :param proposed_text: The proposed TaggedText instance.
-        :return: An accuracy score between 0 and 1.
-        """
-        reference_tags = reference_text.get_tags()
-        proposed_tags = proposed_text.get_tags()
-
-        total_similarity_score = 0.0
-        if len(reference_tags) == 0:
-            return 0.0
-
-        for reference_tag in reference_tags:
-            similarity_scores = [
-                self.calculate_tag_similarity(reference_tag, proposed_tag)
-                for proposed_tag in proposed_tags
-                if self.are_locations_similar(reference_tag.start_index, reference_tag.end_index, proposed_tag.start_index, proposed_tag.end_index)
-            ]
-            if similarity_scores:
-                total_similarity_score += sum(similarity_scores) / len(similarity_scores)
-
-        average_similarity_score = total_similarity_score / len(reference_tags)
+    def compute_accuracy_score(self, reference: 'TaggedText', proposed: 'TaggedText') -> float:
+        ref_tags: List[BaseModel] = reference.get_tags()
+        prop_tags: List[BaseModel] = proposed.get_tags()
 
         if not self.ignore_additional_tags:
-            extra_tags_count = len(proposed_tags) - len(reference_tags)
-            if extra_tags_count > 0:
-                penalty = extra_tags_count / len(proposed_tags)
-                average_similarity_score -= penalty
+            extra_tags_count = max(0, len(prop_tags) - len(ref_tags))
+        else:
+            extra_tags_count = 0
 
-        return max(average_similarity_score, 0.0)
+        total_score = 0.0
+        ref_tag_count = len(ref_tags)
+
+        for ref_tag in ref_tags:
+            matching_scores = []
+            for prop_tag in prop_tags:
+                if self._calculate_position_match(ref_tag.start_index, ref_tag.end_index, prop_tag.start_index,
+                                                  prop_tag.end_index):
+                    attr_similarity = self._calculate_attr_similarity(ref_tag, prop_tag)
+                    match_score = 0.5
+                    if attr_similarity == 1.0:
+                        match_score += 0.5
+                    matching_scores.append(match_score)
+
+            if matching_scores:
+                total_score += max(matching_scores)
+
+        mean_accuracy = total_score / ref_tag_count if ref_tag_count > 0 else 0.0
+
+        penalty = self.penalty_per_extra_tag * extra_tags_count
+        final_accuracy = max(0.0, mean_accuracy - penalty)
+
+        return final_accuracy
 
 
 if __name__ == "__main__":

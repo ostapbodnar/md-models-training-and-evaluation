@@ -55,7 +55,7 @@ class TestTaggedTextComparison:
 
     def test_location_deviation_exceeds_limit(self):
         reference_text = create_tagged_text("<p t='POS'>some <n t='NER'>text</p> here </n>")
-        proposed_text = create_tagged_text("<p t='POS'>soom <n t='NER'>text</p> here </n>")
+        proposed_text = create_tagged_text("<p t='POS'>some <n t='NER'>text   </p> here  </n>")
         comparator = TaggedTextComparison(max_position_deviation=1)
         accuracy_score = comparator.compute_accuracy_score(reference_text, proposed_text)
         assert accuracy_score < 1.0, f"Expected less than 1.0 with location deviation exceeding limit, but got {accuracy_score}"
