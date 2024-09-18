@@ -1,11 +1,28 @@
-import pprint
 from typing import Optional
 
 from bs4 import Tag, BeautifulSoup
-from ua_gec.annotated_text import MutableText
+from ua_gec.annotated_text import MutableText, _unescape
 
-from evaluation.llm_reponse import TextData, Token, GecError
 from evaluation.intersection import has_intersection
+from evaluation.llm_reponse import TextData, Token, GecError
+
+# Define color codes
+TAG_COLORS = {
+    'NOUN': '\033[34m',  # Blue for nouns (calm and neutral)
+    'VERB': '\033[32m',  # Green for verbs (natural, action-related)
+    'NUMR': '\033[33m',  # Yellow for numerals (attention-grabbing but softer)
+    'ADV': '\033[36m',  # Cyan for adverbs (cool and distinct)
+    'ADJ': '\033[35m',  # Magenta for adjectives (creative, descriptive)
+    'PREP': '\033[37m',  # White for prepositions (neutral, connective)
+    'CONJ': '\033[93m',  # Bright yellow for conjunctions (connective, but noticeable)
+    'PART': '\033[96m',  # Bright cyan for particles (stands out, but not too harsh)
+    'PRON': '\033[95m',  # Bright magenta for pronouns (distinct from adjectives)
+    'ADJP': '\033[94m',  # Light blue for participles (softer, less intense)
+    'PUNCT': '\033[90m',  # Grey for punctuation (neutral, less noticeable)
+    'NER': '\033[42m',  # Bright green for named entities (highlighted, clear)
+    'GEC': '\033[41m',  # Red for grammar correction (attention-grabbing)
+    'RESET': '\033[0m'  # Reset color to default
+}
 
 
 class TaggedText:
@@ -55,8 +72,7 @@ class TaggedText:
         """Annotate substring as being corrected."""
         if start > end:
             raise ValueError(
-                f"Start positition {start} should not greater "
-                f"than end position {end}"
+                f"Start position {start} should not be greater than end position {end}"
             )
 
         bad = self._text[start:end]
@@ -72,7 +88,7 @@ class TaggedText:
             self._annotations.append(new_ann)
 
     def _get_overlaps(self, start, end):
-        """Find all annotations that overlap with given range. """
+        """Find all annotations that overlap with the given range. """
 
         res = []
         for ann in self._annotations:
@@ -83,18 +99,10 @@ class TaggedText:
 
     def get_tags(self):
         """Return list of all annotations in the text. """
-
         return self._annotations
 
     def iter_tags(self):
-        """Iterate the annotations in the text.
-
-        This differs from `get_annotations` in that you can safely modify
-        current annotation during the iteration. Specifically, `remove` and
-        `apply_correction` are allowed. Adding and modifying annotations other
-        than the one being iterated is not yet well-defined!
-        """
-
+        """Iterate the annotations in the text."""
         n_anns = len(self._annotations)
         i = 0
         while i < n_anns:
@@ -104,34 +112,22 @@ class TaggedText:
             n_anns = len(self._annotations)
 
     def get_tag_at(self, start, end=None):
-        """Return annotation at the given position or region.
-
-        If only `start` is provided, return annotation that covers that
-        source position.
-
-        If both `start` and `end` are provided, return annotation
-        that matches (start, end) span exactly.
-
-        Return `None` if no annotation was found.
-        """
-
+        """Return annotation at the given position or region."""
         if end is None:
             for ann in self._annotations:
-                if ann.start_index <= start < ann.start_index:
+                if ann.start_index <= start < ann.end_index:
                     return ann
         else:
             for ann in self._annotations:
-                if ann.start_index == start and ann.start_index == end:
+                if ann.start_index == start and ann.end_index == end:
                     return ann
-
         return None
 
     @staticmethod
     def _parse(text):
-        """Return list of annotations found in the text. """
-
+        """Return list of annotations found in the text."""
         soup = BeautifulSoup(text, "html.parser")
-        parsed_tags = []
+        parsed_tags = {}
 
         def recursion(input_tag: Tag, start_index: int):
             raw_sub_text = []
@@ -141,34 +137,40 @@ class TaggedText:
                     index = start_index + len(raw_text)
                     v = recursion(tag, index)
                     word = "".join(v)
-                    parsed_tags.append(
-                        Token(
+                    ident = (index, index + len(word))
+
+                    pos_tag = tag.get("t", "<unk>") if tag.name == "p" else None
+                    ner_tag = tag.get("t", "<unk>") if tag.name == "n" else None
+                    gec_error = GecError(
+                        error=word, edit=tag.get("ed", "<unk>"), error_type=tag.get("et", "<unk>")
+                    ) if tag.name == "g" else None
+
+                    if ident in parsed_tags:
+                        ann = parsed_tags[ident]
+                        ann.pos_tag = ann.pos_tag or pos_tag
+                        ann.ner_tag = ann.ner_tag or ner_tag
+                        ann.gec_error = ann.gec_error or gec_error
+                    else:
+                        parsed_tags[ident] = Token(
                             word=word,
-                            pos_tag=tag.get("t", "<unk>") if tag.name == "p" else None,
-                            ner_tag=tag.get("t", "<unk>") if tag.name == "n" else None,
-                            gec_error=GecError(
-                                error=word, edit=tag.get("ed", "<unk>"), error_type=tag.get("et", "<unk>")
-                            )
-                            if tag.name == "g"
-                            else None,
+                            pos_tag=pos_tag,
+                            ner_tag=ner_tag,
+                            gec_error=gec_error,
                             start_index=index,
-                            end_index=index + len(word),
+                            end_index=index + len(word)
                         )
-                    )
                     raw_sub_text.append(word)
                 elif isinstance(tag, str):
                     raw_sub_text.append(tag)
-                    continue
+                continue
 
             return raw_sub_text
 
         result = recursion(soup, 0)
-
-        return TextData(text="".join(result), tokens=parsed_tags)
+        return TextData(text="".join(result), tokens=list(parsed_tags.values()))
 
     def remove(self, annotation):
-        """Remove annotation, replacing it with the original text. """
-
+        """Remove annotation, replacing it with the original text."""
         try:
             self._annotations.remove(annotation)
         except ValueError:
@@ -176,7 +178,6 @@ class TaggedText:
 
     def get_original_text(self):
         """Return the original (unannotated) text."""
-
         return self._text
 
     def get_tagged_text(self):
@@ -188,12 +189,40 @@ class TaggedText:
 
         return text.get_edited_text()
 
+    def get_corrected_text(self):
+        text = MutableText(self._text)
+        for ann in self._annotations:
+            try:
+                text.replace(ann.start_index, ann.end_index, ann.apply_ann())
+            except IndexError:
+                pass
+
+        return _unescape(text.get_edited_text())
+
+    def get_colored_tagged_text(self):
+        """Return the annotated text with colors."""
+        text = MutableText(self._text)
+        for ann in self._annotations:
+            # Determine the color to use: GEC overrides NER and POS, and NER overrides POS
+            if ann.gec_error:
+                color = TAG_COLORS['GEC']
+            elif ann.ner_tag:
+                color = TAG_COLORS['NER']
+            else:
+                color = TAG_COLORS.get(ann.pos_tag, TAG_COLORS['RESET'])
+
+            reset_color = TAG_COLORS['RESET']
+            text.replace(ann.start_index, ann.end_index, f"{color}{ann.apply_ann()}{reset_color}")
+
+        return text.get_edited_text()
+
 
 if __name__ == "__main__":
-    text = TaggedText("<p t='POS'>some <n t='NER'>text</p> here </n>")
-    print(text.get_tagged_text())
-    print(text.get_original_text())
-    html_text = """Вчора <p t="ADV">я</p> <p t="PRON">купив</p> <p t="VERB">книгу</p> <p t="NOUN">для</p> <g ed="своїй" et="G/Grammar"><n t="ORG"><p t="ADP">своїй</p></n></g> <p t="NOUN">сестри</p>."""
+    # text = TaggedText("<p t='NOUN'>some <n t='NER'>text</p> here </n>")
+    # print(text.get_tagged_text())
+    # print(text.get_original_text())
+    # html_text = """Вчора <p t="ADV">я</p> <p t="PRON">купив</p> <p t="VERB">книгу</p> <p t="NOUN">для</p> <g ed="своїй" et="G/Grammar"><n t="ORG"><p t="ADP">Cвоїй</p></n></g> <p t="NOUN">сестри</p>."""
+    html_text = """Вчора <p t="ADV">я</p> <p t="PRON">купив</p> <p t="VERB">книгу</p> <p t="NOUN">для</p> <n t="ORG">Cвоїй</n> <p t="NOUN">сестри</p>."""
 
     parsed_result = TaggedText(html_text)
-    pprint.pprint(parsed_result.get_tagged_text())
+    print(parsed_result.get_colored_tagged_text())

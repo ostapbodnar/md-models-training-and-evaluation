@@ -31,6 +31,9 @@ class Token:
                 word = mapping[v](word)
         return word
 
+    def apply_ann(self):
+        return self.word if self.gec_error is None else self.gec_error.edit
+
 
 @dataclass
 class TextData:
